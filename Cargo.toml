@@ -1,0 +1,34 @@
+[package]
+name = "rsomics-chi-square"
+version = "0.1.0"
+description = "Chi-square test of independence on a contingency table (with G-test and Fisher exact 2x2) — scipy.stats.chi2_contingency / fisher_exact equivalent, value-exact"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-chi-square"
+authors = ["Zane Leong <efd@live.com>"]
+categories = ["science", "command-line-utilities"]
+keywords = ["statistics", "chi-square", "fisher-exact", "scipy", "bioinformatics"]
+readme = "README.md"
+
+[[bin]]
+name = "rsomics-chi-square"
+path = "src/main.rs"
+
+[lib]
+name = "rsomics_chi_square"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rsomics-common = { version = "0.6", features = ["rayon"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+libm = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "chi2"
+harness = false
