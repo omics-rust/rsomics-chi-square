@@ -1,12 +1,16 @@
 //! Fisher's exact test for a 2×2 contingency table, matching
 //! `scipy.stats.fisher_exact` with the two-sided alternative.
 //!
-//! For a table [[a, b], [c, d]] SciPy parametrises the hypergeometric
-//! distribution as M = a+b+c+d, n = a+b (first row total), N = a+c (first
+//! For a table [[a, b], [c, d]] the hypergeometric distribution is
+//! parametrised as M = a+b+c+d, n1 = a+b (first row total), n = a+c (first
 //! column total), and the cell count a is the random variable. The two-sided
-//! p-value is the sum of hypergeometric probabilities no greater than the
-//! observed table's probability, computed via SciPy's binary-search of the
-//! opposite tail rather than an explicit enumeration — reproduced here exactly.
+//! p-value sums every hypergeometric pmf no greater than the observed table's
+//! pmf. The inclusion test uses a relative tolerance of 1e-7 rather than an
+//! absolute tie: the lgamma-based pmf carries ~1e-13 relative error, so a
+//! tighter cutoff spuriously drops the opposite-tail cell that is genuinely
+//! equal to pmf(observed) on near-symmetric tables, undercounting the tail and
+//! breaking reflection invariance. The 1e-7 window admits true ties while the
+//! spacing between distinct hypergeometric pmfs keeps genuine non-ties out.
 //!
 //! The odds ratio is the sample (conditional) ratio ad/bc, with the same
 //! ±0 / ±∞ edge handling SciPy uses.
@@ -45,49 +49,6 @@ fn hypergeom_pmf(k: i64, m: i64, n: i64, n_draws: i64) -> f64 {
     log_hypergeom_pmf(k, m, n, n_draws).exp()
 }
 
-/// Lower CDF P(X ≤ k).
-fn hypergeom_cdf(k: i64, m: i64, n: i64, n_draws: i64) -> f64 {
-    let lo = (n_draws - (m - n)).max(0);
-    let hi = n.min(n_draws);
-    let mut sum = 0.0;
-    let mut i = lo;
-    while i <= k.min(hi) {
-        sum += hypergeom_pmf(i, m, n, n_draws);
-        i += 1;
-    }
-    sum.min(1.0)
-}
-
-/// Survival function P(X > k).
-fn hypergeom_sf(k: i64, m: i64, n: i64, n_draws: i64) -> f64 {
-    let lo = (n_draws - (m - n)).max(0);
-    let hi = n.min(n_draws);
-    let mut sum = 0.0;
-    let mut i = (k + 1).max(lo);
-    while i <= hi {
-        sum += hypergeom_pmf(i, m, n, n_draws);
-        i += 1;
-    }
-    sum.min(1.0)
-}
-
-/// SciPy's implicit binary search: find i in [lo, hi] with a(i) ≤ d < a(i+1),
-/// where `a` is monotone over [lo, hi].
-fn binary_search<F: Fn(i64) -> f64>(a: F, d: f64, mut lo: i64, mut hi: i64) -> i64 {
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let midval = a(mid);
-        if midval < d {
-            lo = mid + 1;
-        } else if midval > d {
-            hi = mid - 1;
-        } else {
-            return mid;
-        }
-    }
-    if a(lo) <= d { lo } else { lo - 1 }
-}
-
 /// Two-sided Fisher exact test on a 2×2 table [[a, b], [c, d]].
 #[must_use]
 pub fn fisher_exact_2x2(a: i64, b: i64, c: i64, d: i64) -> FisherResult {
@@ -106,38 +67,24 @@ pub fn fisher_exact_2x2(a: i64, b: i64, c: i64, d: i64) -> FisherResult {
     };
 
     let n1 = a + b;
-    let n2 = c + d;
     let n = a + c;
-    let m = n1 + n2;
+    let m = n1 + c + d;
 
-    let pmf = |x: i64| hypergeom_pmf(x, m, n1, n);
+    let lo = (n - (m - n1)).max(0);
+    let hi = n1.min(n);
 
-    let mode = ((n + 1) * (n1 + 1)) / (n1 + n2 + 2);
-    let pexact = pmf(a);
-    let pmode = pmf(mode);
+    let pexact = hypergeom_pmf(a, m, n1, n);
+    let tol = pexact * (1.0 + 1e-7);
 
-    let epsilon = 1e-14;
-    let gamma = 1.0 + epsilon;
-
-    let p = if (pexact - pmode).abs() / pexact.max(pmode) <= epsilon {
-        1.0
-    } else if a < mode {
-        let plower = hypergeom_cdf(a, m, n1, n);
-        if pmf(n) > pexact * gamma {
-            plower
-        } else {
-            let guess = binary_search(|x| -pmf(x), -pexact * gamma, mode, n);
-            plower + hypergeom_sf(guess, m, n1, n)
+    let mut p = 0.0;
+    let mut k = lo;
+    while k <= hi {
+        let pk = hypergeom_pmf(k, m, n1, n);
+        if pk <= tol {
+            p += pk;
         }
-    } else {
-        let pupper = hypergeom_sf(a - 1, m, n1, n);
-        if pmf(0) > pexact * gamma {
-            pupper
-        } else {
-            let guess = binary_search(pmf, pexact * gamma, 0, mode);
-            pupper + hypergeom_cdf(guess, m, n1, n)
-        }
-    };
+        k += 1;
+    }
 
     FisherResult {
         odds_ratio,
@@ -174,7 +121,28 @@ mod tests {
     fn symmetric_table_is_one() {
         let r = fisher_exact_2x2(10, 10, 10, 10);
         close(r.odds_ratio, 1.0, 1e-12);
-        assert_eq!(r.p, 1.0);
+        close(r.p, 1.0, 1e-12);
+    }
+
+    // Near-symmetric tables where the opposite-tail cell equals pmf(observed) to
+    // within lgamma rounding. A tie-inclusion cutoff tighter than the pmf's own
+    // error drops that cell and undercounts the tail; these lock in the scipy
+    // 1.17.1 fisher_exact two-sided values.
+    #[test]
+    fn near_symmetric_reflection_invariant() {
+        let cases = [
+            (10, 16, 25, 19, 0.215_853_063_510_954_62),
+            (29, 39, 24, 14, 0.067_657_451_865_430_01),
+            (32, 16, 8, 24, 0.000_518_578_810_011_806_9),
+            (23, 6, 28, 6, 1.0),
+        ];
+        for (a, b, c, d, want) in cases {
+            let r = fisher_exact_2x2(a, b, c, d);
+            close(r.p, want, 1e-9);
+            // Reflection invariance: swapping rows must not change the p-value.
+            let s = fisher_exact_2x2(c, d, a, b);
+            close(s.p, want, 1e-9);
+        }
     }
 
     #[test]
